@@ -312,6 +312,57 @@ describe('decisions', () => {
     expect(shortKept[3]).toBe(shortMessages[5]);
   });
 
+  it('notes removed calls on a turn that keeps its narration', () => {
+    const messages: Message[] = [
+      message('user', 'Open the PR.'),
+      message('assistant', 'Opened PR #42 and asked for review.', {
+        toolUses: [
+          { tool_use_id: 'gh-1', tool: 'Bash', input: { command: 'gh pr create' }, text: 'https://…/pull/42' },
+          { tool_use_id: 'gh-2', tool: 'Bash', input: { command: 'gh pr edit' }, text: 'ok' },
+        ],
+      }),
+      result('gh-1', 'https://…/pull/42'),
+      result('gh-2', 'ok'),
+      message('assistant', 'Now checking CI.', {
+        toolUses: [{ tool_use_id: 'gh-3', tool: 'Bash', input: { command: 'gh pr checks' }, text: 'pending' }],
+      }),
+      result('gh-3', 'pending'),
+      message('user', 'thanks'),
+    ];
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [
+      decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, options),
+      decideCall(calls[1]!, { keepCall: 0.1, keepResult: 0.1 }, options),
+      decideCall(calls[2]!, { keepCall: 0.9, keepResult: 0.1 }, options),
+    ];
+    const kept = applyDecisions(messages, decisions, calls, 300);
+
+    expect(kept.map((m) => m.text)).toEqual([
+      'Open the PR.',
+      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn; the work it reports was done through those calls, not asserted without them]',
+      'Now checking CI.',
+      '',
+      'thanks',
+    ]);
+    expect(kept[1]?.toolUses).toEqual([]);
+    expect(kept[2]).toBe(messages[4]);
+    expect(kept[3]).toBe(messages[5]);
+
+    const single = applyDecisions(messages, [decisions[0]!], calls, 300);
+    expect(single[1]?.text).toBe(
+      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 1 tool call from this turn; the work it reports was done through those calls, not asserted without them]',
+    );
+    expect(single[1]?.toolUses.map((tool) => tool.tool_use_id)).toEqual(['gh-2']);
+
+    const silent = applyDecisions(
+      [messages[0]!, call('gh-1', 'Bash', { command: 'gh pr create' }, 'x'), result('gh-1', 'x')],
+      [decisions[0]!],
+      calls,
+      300,
+    );
+    expect(silent.map((m) => m.text)).toEqual(['Open the PR.']);
+  });
+
   it('honours truncateHeadChars, including a zero head', () => {
     const messages = transcript();
     const calls = collectToolCalls(messages, 0);

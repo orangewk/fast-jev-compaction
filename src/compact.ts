@@ -140,9 +140,16 @@ function truncatedResultText(text: string, isError: boolean, headChars: number):
   }; re-run the tool if needed]`;
 }
 
+/** Note appended to an assistant turn whose narration outlived its tool calls. */
+function removedCallsNote(count: number): string {
+  return `[fast-jev-compaction removed ${count} tool call${count === 1 ? '' : 's'} from this turn; the work it reports was done through those calls, not asserted without them]`;
+}
+
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result keeps a bounded head and note.
+ * together with its result and leaves a note on the turn's text so the
+ * narration is not mistaken for a tool-free report; a dropped result keeps a
+ * bounded head and note.
  * Messages that lose all their content are removed; untouched messages are
  * returned as the same objects they came in as.
  */
@@ -217,7 +224,12 @@ export function applyDecisions(
     if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
-    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
+    const removedCalls = message.toolUses.length - toolUses.length;
+    const text =
+      removedCalls > 0 && message.text.trim().length > 0
+        ? `${message.text}\n${removedCallsNote(removedCalls)}`
+        : message.text;
+    const rebuilt: Message = { role: message.role, text, toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
