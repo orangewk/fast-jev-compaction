@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyDecisions,
   batchCalls,
+  BOUNDARY_PREFIX,
   buildJevRequest,
   collectToolCalls,
   compact,
@@ -67,6 +68,11 @@ function fakeJev(answer: (name: string) => number, seen: Seen[] = []): JevAsker 
       };
     },
   };
+}
+
+/** The compacted messages minus the boundary notice the round inserts. */
+function body(messages: readonly Message[]): Message[] {
+  return messages.filter((m) => !(m.role === 'user' && m.text.startsWith(BOUNDARY_PREFIX)));
 }
 
 const fit = {
@@ -362,7 +368,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text)).toEqual([
       'Open the PR.',
-      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn; the work it reports was done through those calls, not asserted without them]',
+      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn (Bash(gh pr create), Bash(gh pr edit)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
       'Now checking CI.',
       '',
       'thanks',
@@ -373,7 +379,7 @@ describe('decisions', () => {
 
     const single = applyDecisions(messages, [decisions[0]!], calls, 300);
     expect(single[1]?.text).toBe(
-      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 1 tool call from this turn; the work it reports was done through those calls, not asserted without them]',
+      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 1 tool call from this turn (Bash(gh pr create)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
     );
     expect(single[1]?.toolUses.map((tool) => tool.tool_use_id)).toEqual(['gh-2']);
 
@@ -410,7 +416,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Open the PR.',
-      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn; the work it reports was done through those calls, not asserted without them]',
+      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn (Bash(gh pr create), Bash(gh pr edit)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
       'thanks',
       'Now checking CI.',
       'gh-3',
@@ -470,7 +476,7 @@ describe('compact', () => {
     ]);
     expect(new Set(seen.map((r) => JSON.stringify(r.state))).size).toBe(1);
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
-    expect(output.messages).toHaveLength(messages.length);
+    expect(body(output.messages)).toHaveLength(messages.length);
     expect(output.stats).toMatchObject({ resultsDropped: 3, kept: 0, callsDropped: 0, pinned: 0 });
     expect(reductionRatio(output)).toBeGreaterThan(0);
   });
@@ -481,7 +487,7 @@ describe('compact', () => {
     const output = await compact(messages, fakeJev(() => 0, seen));
     expect(seen).toHaveLength(0);
     expect(output.stats).toMatchObject({ requests: 0, stateStage: '', calls: 0 });
-    expect(output.messages).toEqual(messages);
+    expect(body(output.messages)).toEqual(messages);
   });
 
   it('reports a tiny reduction when Jev wants everything kept', async () => {
@@ -495,7 +501,7 @@ describe('compact', () => {
     const dropped = await compact(transcript(), fakeJev(() => 0), { preserveRecentMessages: 1 });
     expect(kept.stats.candidateChars).toBe(dropped.stats.candidateChars);
     expect(reductionBound(kept)).toBeGreaterThanOrEqual(reductionRatio(dropped));
-    expect(reductionBound(kept) - reductionRatio(dropped)).toBeLessThan(0.1);
+    expect(reductionBound(kept) - reductionRatio(dropped)).toBeLessThan(0.3);
     expect(reductionBound(kept)).toBeGreaterThan(reductionRatio(kept));
   });
 
@@ -521,8 +527,8 @@ describe('compact', () => {
       ['drop_result', 0],
       ['keep', 0.9],
     ]);
-    expect(second.messages).toEqual(first.messages);
-    const entry = (seen[0]?.state as { history: { tool_calls?: HistoryToolCall[] }[] }).history[1];
+    expect(body(second.messages)).toEqual(body(first.messages));
+    const entry = (seen[0]?.state as { history: { tool_calls?: HistoryToolCall[] }[] }).history[2];
     expect(entry?.tool_calls?.[0]?.result).toBe(
       `ok, ${fileA.length} chars originally; an earlier compaction cut it to a 40-char head`,
     );
@@ -542,18 +548,50 @@ describe('compact', () => {
     ];
     const output = await compact(messages, fakeJev(() => 0), { preserveRecentMessages: 1, truncateHeadChars: 50 });
     expect(output.stats.noticesTruncated).toBe(1);
-    expect(output.messages[1]?.text).toBe(
+    expect(output.messages[1]?.text).toContain('[fast-jev-compaction boundary: this round removed 0 tool calls, cut 1 host notice to a head; earlier rounds removed 0 tool calls.');
+    const rest = body(output.messages);
+    expect(rest[1]?.text).toBe(
       `${notice.slice(0, 50)}\n[fast-jev-compaction truncated ${notice.length - 50} chars of this host notice; the full text is in the session transcript]`,
     );
-    expect(output.messages[2]).toBe(messages[2]);
-    expect(output.messages[3]).toBe(messages[3]);
-    expect(output.messages[5]).toBe(messages[5]);
+    expect(rest[2]).toBe(messages[2]);
+    expect(rest[3]).toBe(messages[3]);
+    expect(rest[5]).toBe(messages[5]);
     expect(output.stats.candidateChars).toBe(notice.length - 50);
-    expect(reductionRatio(output)).toBeGreaterThan(0.2);
+    expect(reductionRatio(output)).toBeGreaterThan(0.15);
 
     const again = await compact(output.messages, fakeJev(() => 0), { preserveRecentMessages: 1, truncateHeadChars: 50 });
     expect(again.stats.noticesTruncated).toBe(0);
-    expect(again.messages[1]).toBe(output.messages[1]);
+    expect(body(again.messages)[1]).toBe(rest[1]);
+    expect(again.messages.filter((m) => m.text.startsWith(BOUNDARY_PREFIX))).toHaveLength(1);
+  });
+
+  it('leaves one boundary notice per round, folding earlier rounds into its total', async () => {
+    const first = await compact(transcript(), fakeJev(() => 0), { preserveRecentMessages: 1 });
+    const boundary = (messages: readonly Message[]) =>
+      messages.filter((m) => m.role === 'user' && m.text.startsWith(BOUNDARY_PREFIX));
+    expect(boundary(first.messages)).toHaveLength(1);
+    expect(first.messages[1]?.text).toMatch(
+      /^\[fast-jev-compaction boundary: this round removed 3 tool calls \(Read 2, Bash 1\); earlier rounds removed 0 tool calls\. /,
+    );
+    expect(first.messages[1]?.text).toContain("it is the assistant's report, not the tool record");
+    expect(first.messages[0]).toEqual(transcript()[0]);
+
+    const more = [
+      ...first.messages,
+      message('user', 'now run lint'),
+      call('lint', 'Bash', { command: 'npm run lint' }, 'clean'),
+      result('lint', 'clean'),
+      message('assistant', 'Lint is clean.'),
+      message('user', 'ok'),
+    ];
+    const second = await compact(more, fakeJev(() => 0), { preserveRecentMessages: 1 });
+    expect(boundary(second.messages)).toHaveLength(1);
+    expect(second.messages[1]?.text).toMatch(
+      /^\[fast-jev-compaction boundary: this round removed 1 tool call \(Bash 1\); earlier rounds removed 3 tool calls\. /,
+    );
+
+    const quiet = await compact([message('user', 'hi'), message('assistant', 'hello')], fakeJev(() => 0));
+    expect(boundary(quiet.messages)).toHaveLength(0);
   });
 
   it('counts candidates the fitted state no longer shows, and keeps them on request', async () => {

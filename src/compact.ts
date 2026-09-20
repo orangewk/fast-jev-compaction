@@ -172,7 +172,12 @@ export function truncateHostNotices(
   const out = messages.map((message, index) => {
     if (message.role !== 'user' || (message.toolResults ?? []).length > 0) return message;
     if (isPinned(index, messages.length, options.preserveRecentMessages)) return message;
-    if (!isMachineText(message.text) || message.text.trimStart().startsWith('This session is being continued')) {
+    const start = message.text.trimStart();
+    if (
+      !isMachineText(message.text) ||
+      start.startsWith('This session is being continued') ||
+      start.startsWith(BOUNDARY_PREFIX)
+    ) {
       return message;
     }
     if (message.text.length <= headChars + 120 || message.text.trimEnd().endsWith(NOTICE_NOTE_END)) {
@@ -191,9 +196,86 @@ export function truncateHostNotices(
   return { messages: out, truncated, charsCut };
 }
 
-/** Note appended to an assistant turn whose narration outlived its tool calls. */
-function removedCallsNote(count: number): string {
-  return `[fast-jev-compaction removed ${count} tool call${count === 1 ? '' : 's'} from this turn; the work it reports was done through those calls, not asserted without them]`;
+const LABEL_INPUT_CHARS = 60;
+const LABELS_PER_NOTE = 3;
+
+/** `Bash(gh pr create --title …)`: the tool and the gist of its input. */
+function callLabel(tool: Pick<ToolUse, 'tool' | 'input'>): string {
+  const first = Object.values(tool.input).find((value) => typeof value === 'string') as
+    | string
+    | undefined;
+  let gist = first ?? '';
+  if (!gist) {
+    try {
+      gist = JSON.stringify(tool.input);
+    } catch {
+      gist = '';
+    }
+  }
+  gist = gist.replace(/\s+/g, ' ').trim();
+  if (gist.length > LABEL_INPUT_CHARS) gist = `${gist.slice(0, LABEL_INPUT_CHARS - 1)}…`;
+  return `${tool.tool}(${gist})`;
+}
+
+/**
+ * Note appended to an assistant turn whose narration outlived its tool
+ * calls. It names the calls so the receipt survives, and says what the text
+ * now is: a report, not the record.
+ */
+function removedCallsNote(removed: readonly Pick<ToolUse, 'tool' | 'input'>[]): string {
+  const count = removed.length;
+  const labels = removed.slice(0, LABELS_PER_NOTE).map(callLabel);
+  if (count > LABELS_PER_NOTE) labels.push(`+${count - LABELS_PER_NOTE} more`);
+  return `[fast-jev-compaction removed ${count} tool call${count === 1 ? '' : 's'} from this turn (${labels.join(', ')}); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`;
+}
+
+export const BOUNDARY_PREFIX = '[fast-jev-compaction boundary:';
+const BOUNDARY_EARLIER = /earlier rounds removed (\d+) tool calls?/;
+
+function countByTool(decisions: readonly CallDecision[]): string {
+  const counts = new Map<string, number>();
+  for (const decision of decisions) {
+    if (decision.action === 'drop_call') counts.set(decision.tool, (counts.get(decision.tool) ?? 0) + 1);
+  }
+  const top = [...counts].sort((a, b) => b[1] - a[1]);
+  const shown = top.slice(0, 4).map(([tool, n]) => `${tool} ${n}`);
+  if (top.length > 4) shown.push('…');
+  return shown.join(', ');
+}
+
+/**
+ * One message per compaction, right after the pinned first message, saying
+ * what this round removed and how much earlier rounds removed before it, so
+ * the assistant reads the survivors as survivors. A boundary from an earlier
+ * round is replaced, its count folded into the total.
+ */
+export function withBoundary(
+  messages: readonly Message[],
+  decisions: readonly CallDecision[],
+  stats: { resultsDropped: number; noticesTruncated: number },
+): Message[] {
+  const dropped = decisions.filter((decision) => decision.action === 'drop_call').length;
+  let earlier = 0;
+  const rest = messages.filter((message) => {
+    if (message.role !== 'user' || !message.text.startsWith(BOUNDARY_PREFIX)) return true;
+    const own = /this round removed (\d+) tool calls?/.exec(message.text);
+    const before = BOUNDARY_EARLIER.exec(message.text);
+    earlier += Number(own?.[1] ?? 0) + Number(before?.[1] ?? 0);
+    return false;
+  });
+  if (dropped === 0 && stats.resultsDropped === 0 && stats.noticesTruncated === 0 && earlier === 0) {
+    return [...messages];
+  }
+  const removed = dropped > 0 ? ` (${countByTool(decisions)})` : '';
+  const parts = [
+    `this round removed ${dropped} tool call${dropped === 1 ? '' : 's'}${removed}`,
+    stats.resultsDropped > 0 ? `cut ${stats.resultsDropped} tool result${stats.resultsDropped === 1 ? '' : 's'} to a head` : '',
+    stats.noticesTruncated > 0 ? `cut ${stats.noticesTruncated} host notice${stats.noticesTruncated === 1 ? '' : 's'} to a head` : '',
+  ].filter(Boolean);
+  const text = `${BOUNDARY_PREFIX} ${parts.join(', ')}; earlier rounds removed ${earlier} tool call${earlier === 1 ? '' : 's'}. Assistant text above that reports work done through removed calls carries a "[fast-jev-compaction removed …]" note: it is the assistant's report, not the tool record. Re-verify with a tool before treating such state as current.]`;
+  const boundary: Message = { role: 'user', text, toolUses: [] };
+  if (rest.length === 0) return [boundary];
+  return [rest[0]!, boundary, ...rest.slice(1)];
 }
 
 /**
@@ -234,14 +316,14 @@ export function applyDecisions(
     if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
   }
   const kept: (Message | null)[] = [];
-  const removedCalls = new Map<number, number>();
+  const removedCalls = new Map<number, ToolUse[]>();
   messages.forEach((message, index) => {
     const dropped = message.toolUses.filter(
       (tool) => actions.get(tool.tool_use_id) === 'drop_call',
-    ).length;
-    if (dropped > 0) {
+    );
+    if (dropped.length > 0) {
       const at = narrationIndex(messages, index);
-      if (at >= 0) removedCalls.set(at, (removedCalls.get(at) ?? 0) + dropped);
+      if (at >= 0) removedCalls.set(at, [...(removedCalls.get(at) ?? []), ...dropped]);
     }
   });
   for (const message of messages) {
@@ -307,12 +389,12 @@ export function applyDecisions(
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
-  for (const [index, count] of removedCalls) {
+  for (const [index, removed] of removedCalls) {
     const message = kept[index];
     if (!message) continue;
     const noted: Message = {
       role: message.role,
-      text: `${message.text}\n${removedCallsNote(count)}`,
+      text: `${message.text}\n${removedCallsNote(removed)}`,
       toolUses: message.toolUses,
     };
     if (message.toolResults) noted.toolResults = message.toolResults;
@@ -405,7 +487,10 @@ export async function compact(
     applyDecisions(messages, decisions, calls, resolved.truncateHeadChars),
     resolved,
   );
-  const kept = notices.messages;
+  const kept = withBoundary(notices.messages, decisions, {
+    resultsDropped: count(decisions, 'result_dropped'),
+    noticesTruncated: notices.truncated,
+  });
   return {
     messages: kept,
     decisions,

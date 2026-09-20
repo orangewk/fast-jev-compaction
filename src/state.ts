@@ -230,6 +230,7 @@ const MACHINE_TEXT_PREFIXES = [
   '<bash-stdout>',
   '<bash-stderr>',
   'This session is being continued from a previous conversation',
+  '[fast-jev-compaction boundary:',
 ] as const;
 
 /** Whether a user-role text was written by the host, not typed by the user. */
