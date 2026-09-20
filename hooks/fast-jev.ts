@@ -103,13 +103,13 @@ export type Verdict =
 export function verdict(
   result: CompactResult,
   config: Pick<HookConfig, 'minReductionRatio' | 'compactAtPercent'>,
-  contextPercent: number | undefined,
+  windowPercent: number | undefined,
 ): Verdict {
   const reduction = reductionRatio(result);
   if (reduction >= config.minReductionRatio) return { kind: 'scored' };
   const bound = reductionBound(result);
-  if (contextPercent !== undefined) {
-    const estimatedPercent = contextPercent * (1 - reduction);
+  if (windowPercent !== undefined) {
+    const estimatedPercent = windowPercent * (1 - reduction);
     if (estimatedPercent >= config.compactAtPercent) return { kind: 'capacity', estimatedPercent };
   }
   if (bound < config.minReductionRatio) return { kind: 'nothing_to_prune', bound };
@@ -276,11 +276,11 @@ async function getApiKey(
 
 /** The context window's fill before compaction, or undefined where the host does not report it. */
 async function contextPercent($: {
-  session?: { usage?: () => Promise<{ context?: { percent?: number } }> };
+  session: { usage: () => Promise<{ context: { percent?: number } }> };
 }): Promise<number | undefined> {
   try {
-    const usage = await $.session?.usage?.();
-    const value = usage?.context?.percent;
+    const usage = await $.session.usage();
+    const value = usage.context.percent;
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   } catch {
     return undefined;
