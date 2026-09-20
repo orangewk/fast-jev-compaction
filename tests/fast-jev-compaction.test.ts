@@ -363,6 +363,43 @@ describe('decisions', () => {
     expect(silent.map((m) => m.text)).toEqual(['Open the PR.']);
   });
 
+  it('notes removed calls on the narration when a turn arrives as separate messages', () => {
+    const messages: Message[] = [
+      message('user', 'Open the PR.'),
+      message('assistant', 'Opened PR #42 and asked for review.'),
+      call('gh-1', 'Bash', { command: 'gh pr create' }, 'https://…/pull/42'),
+      result('gh-1', 'https://…/pull/42'),
+      call('gh-2', 'Bash', { command: 'gh pr edit' }, 'ok'),
+      result('gh-2', 'ok'),
+      message('user', 'thanks'),
+      message('assistant', 'Now checking CI.'),
+      call('gh-3', 'Bash', { command: 'gh pr checks' }, 'pending'),
+      result('gh-3', 'pending'),
+      message('user', 'ok'),
+    ];
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [
+      decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, options),
+      decideCall(calls[1]!, { keepCall: 0.1, keepResult: 0.1 }, options),
+      decideCall(calls[2]!, { keepCall: 0.9, keepResult: 0.9 }, options),
+    ];
+    const kept = applyDecisions(messages, decisions, calls, 300);
+
+    expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
+      'Open the PR.',
+      'Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn; the work it reports was done through those calls, not asserted without them]',
+      'thanks',
+      'Now checking CI.',
+      'gh-3',
+      'gh-3',
+      'ok',
+    ]);
+    expect(kept[3]).toBe(messages[7]);
+
+    const noNarration = applyDecisions(messages.slice(2, 7), [decisions[0]!, decisions[1]!], collectToolCalls(messages.slice(2, 7), 0), 300);
+    expect(noNarration.map((m) => m.text)).toEqual(['thanks']);
+  });
+
   it('honours truncateHeadChars, including a zero head', () => {
     const messages = transcript();
     const calls = collectToolCalls(messages, 0);

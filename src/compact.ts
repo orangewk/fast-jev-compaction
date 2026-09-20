@@ -146,12 +146,29 @@ function removedCallsNote(count: number): string {
 }
 
 /**
+ * The message that narrates the turn a tool call belongs to: the message
+ * itself when it has text, else the nearest earlier assistant message with
+ * text before any user prompt (a host may hand one turn as a text message
+ * followed by tool-use-only messages and their result carriers).
+ */
+function narrationIndex(messages: readonly Message[], index: number): number {
+  for (let i = index; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role === 'user') {
+      if (message.text.trim().length > 0 || !(message.toolResults?.length)) return -1;
+      continue;
+    }
+    if (message.text.trim().length > 0) return i;
+  }
+  return -1;
+}
+
+/**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result and leaves a note on the turn's text so the
- * narration is not mistaken for a tool-free report; a dropped result keeps a
- * bounded head and note.
- * Messages that lose all their content are removed; untouched messages are
- * returned as the same objects they came in as.
+ * together with its result and leaves a note on the turn's narration so it is
+ * not mistaken for a tool-free report; a dropped result keeps a bounded head
+ * and note. Messages that lose all their content are removed; untouched
+ * messages are returned as the same objects they came in as.
  */
 export function applyDecisions(
   messages: readonly Message[],
@@ -165,7 +182,17 @@ export function applyDecisions(
     const call = byId.get(decision.id);
     if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
   }
-  const kept: Message[] = [];
+  const kept: (Message | null)[] = [];
+  const removedCalls = new Map<number, number>();
+  messages.forEach((message, index) => {
+    const dropped = message.toolUses.filter(
+      (tool) => actions.get(tool.tool_use_id) === 'drop_call',
+    ).length;
+    if (dropped > 0) {
+      const at = narrationIndex(messages, index);
+      if (at >= 0) removedCalls.set(at, (removedCalls.get(at) ?? 0) + dropped);
+    }
+  });
   for (const message of messages) {
     const touched =
       message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
@@ -222,18 +249,25 @@ export function applyDecisions(
       continue;
     }
     if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
+      kept.push(null);
       continue;
     }
-    const removedCalls = message.toolUses.length - toolUses.length;
-    const text =
-      removedCalls > 0 && message.text.trim().length > 0
-        ? `${message.text}\n${removedCallsNote(removedCalls)}`
-        : message.text;
-    const rebuilt: Message = { role: message.role, text, toolUses };
+    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
-  return kept;
+  for (const [index, count] of removedCalls) {
+    const message = kept[index];
+    if (!message) continue;
+    const noted: Message = {
+      role: message.role,
+      text: `${message.text}\n${removedCallsNote(count)}`,
+      toolUses: message.toolUses,
+    };
+    if (message.toolResults) noted.toolResults = message.toolResults;
+    kept[index] = noted;
+  }
+  return kept.filter((message): message is Message => message !== null);
 }
 
 /** Characters of text, tool input and tool output a message holds. */
