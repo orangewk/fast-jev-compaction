@@ -309,7 +309,14 @@ export function applyDecisions(
       message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
       (message.toolResults ?? []).some((result) => actions.has(result.tool_use_id));
     if (!touched) {
-      kept.push(message);
+      kept.push(
+        message.role === 'assistant' &&
+          message.text.trim().length === 0 &&
+          message.toolUses.length === 0 &&
+          (message.toolResults?.length ?? 0) === 0
+          ? null
+          : message,
+      );
       continue;
     }
     const toolUses = message.toolUses

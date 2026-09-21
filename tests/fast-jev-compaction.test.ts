@@ -392,6 +392,18 @@ describe('decisions', () => {
     expect(silent.map((m) => m.text)).toEqual(['Open the PR.']);
   });
 
+  it('drops empty assistant messages but keeps thinking-only text', () => {
+    const empty = message('assistant', '');
+    const thinking = message('assistant', 'thinking through the next step');
+    const messages = [message('user', 'start'), empty, thinking, message('user', 'done')];
+
+    expect(applyDecisions(messages, [], [], 300)).toEqual([
+      messages[0],
+      thinking,
+      messages[3],
+    ]);
+  });
+
   it('notes removed calls on the narration when a turn arrives as separate messages', () => {
     const messages: Message[] = [
       message('user', 'Open the PR.'),
