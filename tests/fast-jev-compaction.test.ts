@@ -368,7 +368,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text)).toEqual([
       'Open the PR.',
-      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn (Bash(gh pr create), Bash(gh pr edit)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
+      'Opened PR #42 and asked for review.\n[⌫2]',
       'Now checking CI.',
       '',
       'thanks',
@@ -379,7 +379,7 @@ describe('decisions', () => {
 
     const single = applyDecisions(messages, [decisions[0]!], calls, 300);
     expect(single[1]?.text).toBe(
-      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 1 tool call from this turn (Bash(gh pr create)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
+      'Opened PR #42 and asked for review.\n[⌫1]',
     );
     expect(single[1]?.toolUses.map((tool) => tool.tool_use_id)).toEqual(['gh-2']);
 
@@ -416,7 +416,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Open the PR.',
-      `Opened PR #42 and asked for review.\n[fast-jev-compaction removed 2 tool calls from this turn (Bash(gh pr create), Bash(gh pr edit)); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`,
+      'Opened PR #42 and asked for review.\n[⌫2]',
       'thanks',
       'Now checking CI.',
       'gh-3',
@@ -573,7 +573,7 @@ describe('compact', () => {
     expect(first.messages[1]?.text).toMatch(
       /^\[fast-jev-compaction boundary: this round removed 3 tool calls \(Read 2, Bash 1\); earlier rounds removed 0 tool calls\. /,
     );
-    expect(first.messages[1]?.text).toContain("it is the assistant's report, not the tool record");
+    expect(first.messages[1]?.text).toContain('[⌫N] lost N tool records');
     expect(first.messages[0]).toEqual(transcript()[0]);
 
     const more = [

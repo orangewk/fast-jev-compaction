@@ -196,37 +196,15 @@ export function truncateHostNotices(
   return { messages: out, truncated, charsCut };
 }
 
-const LABEL_INPUT_CHARS = 60;
-const LABELS_PER_NOTE = 3;
-
-/** `Bash(gh pr create --title …)`: the tool and the gist of its input. */
-function callLabel(tool: Pick<ToolUse, 'tool' | 'input'>): string {
-  const first = Object.values(tool.input).find((value) => typeof value === 'string') as
-    | string
-    | undefined;
-  let gist = first ?? '';
-  if (!gist) {
-    try {
-      gist = JSON.stringify(tool.input);
-    } catch {
-      gist = '';
-    }
-  }
-  gist = gist.replace(/\s+/g, ' ').trim();
-  if (gist.length > LABEL_INPUT_CHARS) gist = `${gist.slice(0, LABEL_INPUT_CHARS - 1)}…`;
-  return `${tool.tool}(${gist})`;
-}
-
 /**
  * Note appended to an assistant turn whose narration outlived its tool
- * calls. It names the calls so the receipt survives, and says what the text
- * now is: a report, not the record.
+ * calls: the count of calls removed, nothing else. The boundary notice for
+ * the round says once what the mark means; the transcript's decisions keep
+ * which calls they were.
  */
+export const REMOVED_MARK = '⌫';
 function removedCallsNote(removed: readonly Pick<ToolUse, 'tool' | 'input'>[]): string {
-  const count = removed.length;
-  const labels = removed.slice(0, LABELS_PER_NOTE).map(callLabel);
-  if (count > LABELS_PER_NOTE) labels.push(`+${count - LABELS_PER_NOTE} more`);
-  return `[fast-jev-compaction removed ${count} tool call${count === 1 ? '' : 's'} from this turn (${labels.join(', ')}); this text is the assistant's report, not the tool records — re-verify with a tool before treating it as current]`;
+  return `[${REMOVED_MARK}${removed.length}]`;
 }
 
 export const BOUNDARY_PREFIX = '[fast-jev-compaction boundary:';
@@ -272,7 +250,7 @@ export function withBoundary(
     stats.resultsDropped > 0 ? `cut ${stats.resultsDropped} tool result${stats.resultsDropped === 1 ? '' : 's'} to a head` : '',
     stats.noticesTruncated > 0 ? `cut ${stats.noticesTruncated} host notice${stats.noticesTruncated === 1 ? '' : 's'} to a head` : '',
   ].filter(Boolean);
-  const text = `${BOUNDARY_PREFIX} ${parts.join(', ')}; earlier rounds removed ${earlier} tool call${earlier === 1 ? '' : 's'}. Assistant text above that reports work done through removed calls carries a "[fast-jev-compaction removed …]" note: it is the assistant's report, not the tool record. Re-verify with a tool before treating such state as current.]`;
+  const text = `${BOUNDARY_PREFIX} ${parts.join(', ')}; earlier rounds removed ${earlier} tool call${earlier === 1 ? '' : 's'}. An assistant message ending in [${REMOVED_MARK}N] lost N tool records: it is a report, not the record — re-verify with a tool before using it as current state.]`;
   const boundary: Message = { role: 'user', text, toolUses: [] };
   if (rest.length === 0) return [boundary];
   return [rest[0]!, boundary, ...rest.slice(1)];
