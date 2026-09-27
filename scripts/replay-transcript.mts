@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { JevClient } from '../src/client.js';
 import { compact, reductionBound, reductionRatio } from '../src/compact.js';
 import type { JevAsker, Message, ToolResult, ToolUse } from '../src/types.js';
-import { verdict } from '../hooks/fast-jev.js';
+import { estimatedContextPercent, estimateTokensSaved, verdict } from '../hooks/fast-jev.js';
 
 type Row = Record<string, unknown> & { line: number };
 
@@ -32,6 +32,34 @@ function rows(file: string): Row[] {
 }
 
 type Boundary = { line: number; index: number; kind: 'jev' | 'summary'; at: string };
+
+const REPLAY_WINDOW_TOKENS = 1_000_000;
+
+function requestTokens(row: Row): number | undefined {
+  if (row['type'] !== 'assistant' || row['isSidechain'] === true) return undefined;
+  const message = row['message'] as Record<string, unknown> | undefined;
+  if (!message || message['model'] === '<synthetic>') return undefined;
+  const usage = message['usage'] as Record<string, unknown> | undefined;
+  if (!usage) return undefined;
+  const input = (item: Record<string, unknown>): number =>
+    ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].reduce(
+      (sum, key) => sum + (typeof item[key] === 'number' ? (item[key] as number) : 0),
+      0,
+    );
+  const iterations = usage['iterations'];
+  return Array.isArray(iterations)
+    ? iterations.reduce((sum, item) => sum + input(item as Record<string, unknown>), 0)
+    : input(usage);
+}
+
+function nearestUsage(all: Row[], at: string, before: boolean): number | undefined {
+  const target = Date.parse(at);
+  const matches = all
+    .map((row) => ({ row, time: Date.parse(String(row['timestamp'] ?? '')), tokens: requestTokens(row) }))
+    .filter(({ time, tokens }) => tokens !== undefined && (before ? time < target : time > target))
+    .sort((a, b) => before ? b.time - a.time : a.time - b.time);
+  return matches[0]?.tokens;
+}
 
 /**
  * Compaction boundaries, once each. The engine re-logs the whole chain of
@@ -141,9 +169,9 @@ const asker: JevAsker = useJev
 
 const all = rows(file);
 const marks = boundaries(all);
-const config = { minReductionRatio: 0.25, compactAtPercent: 60 };
+const config = { minReductionRatio: 0.25, compactAtPercent: 60, floorPercent: 25 };
 console.log(`${file}\n${marks.length} compaction boundaries (${marks.filter((m) => m.kind === 'jev').length} jev)\n`);
-console.log('round | actual  | msgs | chars   | text% | cands | bound | reduction | unscored | notices | stage                  | new verdict');
+console.log('round | actual  | msgs | chars   | text% | cands | bound | reduction | unscored | notices | stage                  | estimate | next sent / 1M | verdict');
 let previous: Boundary | undefined;
 let round = 0;
 for (const mark of marks) {
@@ -160,8 +188,15 @@ for (const mark of marks) {
     const result = await compact(messages, asker, { keepUnscored });
     const chars = result.stats.charsBefore;
     const textChars = messages.reduce((s, m) => s + m.text.length, 0);
-    const out = verdict(result, config, undefined);
-    line = `${String(messages.length).padStart(4)} | ${String(chars).padStart(7)} | ${String(Math.round((100 * textChars) / chars)).padStart(4)}% | ${String(result.stats.calls - result.stats.pinned).padStart(5)} | ${(100 * reductionBound(result)).toFixed(0).padStart(4)}% | ${(100 * reductionRatio(result)).toFixed(0).padStart(8)}% | ${String(result.stats.unscored).padStart(8)} | ${String(result.stats.noticesTruncated).padStart(7)} | ${result.stats.stateStage.padEnd(22)} | ${out.kind}`;
+    const usage = nearestUsage(all, mark.at, true);
+    const sent = nearestUsage(all, mark.at, false);
+    const context = usage === undefined ? undefined : { tokens: usage, window: REPLAY_WINDOW_TOKENS };
+    const saved = estimateTokensSaved(messages, result.messages);
+    const out = verdict(result, config, context, saved);
+    const estimate = estimatedContextPercent(context, saved);
+    const sentPercent = sent === undefined ? undefined : 100 * sent / REPLAY_WINDOW_TOKENS;
+    const fmt = (value: number | undefined): string => value === undefined ? '—' : `${value.toFixed(1)}%`;
+    line = `${String(messages.length).padStart(4)} | ${String(chars).padStart(7)} | ${String(Math.round((100 * textChars) / chars)).padStart(4)}% | ${String(result.stats.calls - result.stats.pinned).padStart(5)} | ${(100 * reductionBound(result)).toFixed(0).padStart(4)}% | ${(100 * reductionRatio(result)).toFixed(0).padStart(8)}% | ${String(result.stats.unscored).padStart(8)} | ${String(result.stats.noticesTruncated).padStart(7)} | ${result.stats.stateStage.padEnd(22)} | ${fmt(estimate)} | ${fmt(sentPercent)} | ${out.kind}`;
   } catch (error) {
     line = `${String(messages.length).padStart(4)} | throws: ${(error as Error).message}`;
   }

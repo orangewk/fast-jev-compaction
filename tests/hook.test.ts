@@ -61,7 +61,7 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest' });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, floorPercent: 25, minReductionRatio: 0.25, model: 'jev-latest' });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
     ).toEqual({
@@ -71,6 +71,7 @@ describe('hook config', () => {
       model: 'jev-x',
       goal: 'g',
       compactAtPercent: 60,
+      floorPercent: 25,
       minReductionRatio: 0.25,
     });
   });
@@ -154,22 +155,39 @@ describe('compactSession', () => {
     const history = [transcript()[0]!, prose, ...transcript().slice(1)];
     const { result: output } = await compactSession(history, config, jevFetch(() => 0));
     expect(reductionRatio(output)).toBeLessThan(config.minReductionRatio);
-    expect(verdict(output, config, undefined)).toEqual({
+    expect(verdict(output, config, undefined, 0)).toEqual({
       kind: 'nothing_to_prune',
       bound: reductionBound(output),
     });
-    expect(verdict(output, config, 30)).toMatchObject({ kind: 'nothing_to_prune' });
-    expect(verdict(output, config, 90)).toMatchObject({ kind: 'capacity' });
+    expect(verdict(output, config, { tokens: 200, window: 1000 }, 0)).toMatchObject({ kind: 'nothing_to_prune' });
+    expect(verdict(output, config, { tokens: 900, window: 1000 }, 0)).toMatchObject({ kind: 'capacity' });
   });
 
   it('calls a real reduction scored, and Jev keeping everything scored too while the window has room', async () => {
     const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
     const { result: dropped } = await compactSession(transcript(), config, jevFetch(() => 0));
-    expect(verdict(dropped, config, 95)).toEqual({ kind: 'scored' });
+    expect(verdict(dropped, config, { tokens: 200, window: 1000 }, 0)).toEqual({ kind: 'scored' });
     const { result: kept } = await compactSession(transcript(), config, jevFetch(() => 0.95));
     expect(reductionRatio(kept)).toBe(0);
-    expect(verdict(kept, config, 30)).toEqual({ kind: 'scored' });
-    expect(verdict(kept, config, 70)).toMatchObject({ kind: 'capacity', estimatedPercent: 70 });
+    expect(verdict(kept, config, { tokens: 200, window: 1000 }, 0)).toEqual({ kind: 'scored' });
+    expect(verdict(kept, config, { tokens: 700, window: 1000 }, 0)).toMatchObject({ kind: 'capacity', estimatedPercent: 70 });
+  });
+
+  it('falls back at the floor despite a 78% reduction, but scores when the estimate is below it', async () => {
+    const config = resolveHookConfig({ preserveRecentMessages: 1 });
+    const { result: compacted } = await compactSession(transcript(), { ...config, apiKey: 'k' }, jevFetch(() => 0));
+    const result = {
+      ...compacted,
+      stats: { ...compacted.stats, charsBefore: 1000, charsAfter: 220, candidateChars: 780 },
+    };
+    expect(reductionRatio(result)).toBe(0.78);
+    expect(verdict(result, config, { tokens: 520_000, window: 1_000_000 }, 194_000)).toEqual({
+      kind: 'capacity',
+      estimatedPercent: 32.6,
+    });
+    expect(verdict(result, config, { tokens: 520_000, window: 1_000_000 }, 300_000)).toEqual({
+      kind: 'scored',
+    });
   });
 
   it('throws on a missing key and on failed requests so the hook falls back', async () => {

@@ -10,6 +10,7 @@ import type {
 
 import { compact, reductionBound, reductionRatio, resolveOptions } from '../src/compact.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import { estimateTokens } from '../src/state.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -21,6 +22,7 @@ import type {
 
 const HOOK_DEFAULTS = {
   compactAtPercent: 60,
+  floorPercent: 25,
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
 };
@@ -43,6 +45,7 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 export type HookConfig = CompactOptions & {
   apiKey?: string;
   compactAtPercent: number;
+  floorPercent: number;
   minReductionRatio: number;
   model: string;
 };
@@ -73,6 +76,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const config: HookConfig = {
     ...numbers,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
+    floorPercent: optionNumber(options, 'floorPercent', HOOK_DEFAULTS.floorPercent),
     minReductionRatio: optionNumber(
       options,
       'minReductionRatio',
@@ -93,6 +97,22 @@ export type Verdict =
   | { kind: 'nothing_to_prune'; bound: number }
   | { kind: 'capacity'; estimatedPercent: number };
 
+export type ContextUsage = { tokens?: number; window: number };
+
+export function estimatedContextPercent(
+  usage: ContextUsage | undefined,
+  tokensSaved: number,
+): number | undefined {
+  if (
+    !usage ||
+    typeof usage.tokens !== 'number' ||
+    !Number.isFinite(usage.tokens) ||
+    !Number.isFinite(usage.window) ||
+    usage.window <= 0
+  ) return undefined;
+  return 100 * Math.max(0, usage.tokens - Math.max(0, tokensSaved)) / usage.window;
+}
+
 /**
  * What the compaction outcome means. Reduction below `minReductionRatio` is
  * not a failure when the candidates could not have freed that much anyway
@@ -102,18 +122,36 @@ export type Verdict =
  */
 export function verdict(
   result: CompactResult,
-  config: Pick<HookConfig, 'minReductionRatio' | 'compactAtPercent'>,
-  windowPercent: number | undefined,
+  config: Pick<HookConfig, 'minReductionRatio' | 'compactAtPercent' | 'floorPercent'>,
+  usage: ContextUsage | undefined,
+  tokensSaved: number,
 ): Verdict {
   const reduction = reductionRatio(result);
-  if (reduction >= config.minReductionRatio) return { kind: 'scored' };
   const bound = reductionBound(result);
-  if (windowPercent !== undefined) {
-    const estimatedPercent = windowPercent * (1 - reduction);
-    if (estimatedPercent >= config.compactAtPercent) return { kind: 'capacity', estimatedPercent };
+  const estimatedPercent = estimatedContextPercent(usage, tokensSaved);
+  if (estimatedPercent !== undefined && estimatedPercent >= config.floorPercent) {
+    return { kind: 'capacity', estimatedPercent };
   }
+  if (reduction >= config.minReductionRatio) return { kind: 'scored' };
   if (bound < config.minReductionRatio) return { kind: 'nothing_to_prune', bound };
   return { kind: 'scored' };
+}
+
+function estimateMessageTokens(messages: readonly Message[]): number {
+  return messages.reduce((total, message) => {
+    total += estimateTokens(message.text);
+    for (const tool of message.toolUses) {
+      total += estimateTokens(tool.tool);
+      total += estimateTokens(JSON.stringify(tool.input));
+      total += estimateTokens(tool.text ?? '');
+    }
+    for (const result of message.toolResults ?? []) total += estimateTokens(result.text);
+    return total;
+  }, 0);
+}
+
+export function estimateTokensSaved(before: readonly Message[], after: readonly Message[]): number {
+  return Math.max(0, estimateMessageTokens(before) - estimateMessageTokens(after));
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
@@ -274,14 +312,13 @@ async function getApiKey(
   return undefined;
 }
 
-/** The context window's fill before compaction, or undefined where the host does not report it. */
-async function contextPercent($: {
-  session: { usage: () => Promise<{ context: { percent?: number } }> };
-}): Promise<number | undefined> {
+/** The last measured context tokens and model window, or undefined where usage is unavailable. */
+async function contextUsage($: {
+  session: { usage: () => Promise<{ context: ContextUsage }> };
+}): Promise<ContextUsage | undefined> {
   try {
     const usage = await $.session.usage();
-    const value = usage.context.percent;
-    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    return usage.context;
   } catch {
     return undefined;
   }
@@ -312,7 +349,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
         return { status: response.status, ok: response.ok, text: response.text };
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
-      const outcome = verdict(result, config, await contextPercent($));
+      const outcome = verdict(
+        result,
+        config,
+        await contextUsage($),
+        estimateTokensSaved(event.messages, messages),
+      );
       if (outcome.kind === 'capacity') {
         notify(
           $,
