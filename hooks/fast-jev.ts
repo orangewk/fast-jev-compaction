@@ -46,6 +46,8 @@ export type HookConfig = CompactOptions & {
   apiKey?: string;
   compactAtPercent: number;
   floorPercent: number;
+  /** Write the per-call decision lines to the transcript; off by default, as they run to thousands of characters. */
+  logDecisions: boolean;
   minReductionRatio: number;
   model: string;
 };
@@ -77,6 +79,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     ...numbers,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
     floorPercent: optionNumber(options, 'floorPercent', HOOK_DEFAULTS.floorPercent),
+    logDecisions: options['logDecisions'] === true,
     minReductionRatio: optionNumber(
       options,
       'minReductionRatio',
@@ -337,9 +340,40 @@ function notify(
   $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
+/**
+ * The slash command a delivery consists of, or undefined. A slash command that
+ * reaches a busy session from a Remote Control client is not run: the engine
+ * hands it to the model as a queued message, and the sender sees nothing.
+ */
+export function bareSlashCommand(text: string): string | undefined {
+  const match = /^\/([A-Za-z][\w:-]*)(?:[ \t][^\n]*)?$/.exec(text.trim());
+  return match ? `/${match[1]}` : undefined;
+}
+
+/** What the model reads in place of a slash command that arrived mid-turn. */
+export function busyCommandNotice(command: string): string {
+  return (
+    `[fast-jev-compaction: リモートから ${command} が届いたが、作業中だったため実行されていない。` +
+    `コマンドは作業が止まっている間しか効かない。作業を続けたまま、送り主に次のように一言伝えること: ` +
+    `「${command} は作業中だったので実行されていない。作業が止まってから送り直すか、先に止めてから送って」]`
+  );
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
+  let turnRunning = false;
+
+  on('turn.start', async (_$, event, next) => {
+    turnRunning = true;
+    return next(event);
+  });
+
+  on('session.receive', async (_$, event, next) => {
+    const command = event.origin.kind === 'bridge' ? bareSlashCommand(event.text) : undefined;
+    if (!command || !turnRunning) return next(event);
+    return next({ ...event, text: busyCommandNotice(command) });
+  });
 
   on('session.compact', async ($, event, next) => {
     if (event.agentId) return next(event);
@@ -350,7 +384,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
-      for (const line of decisionLogLines(result)) $.ui.log(line);
+      if (config.logDecisions) for (const line of decisionLogLines(result)) $.ui.log(line);
       const outcome = verdict(
         result,
         config,
@@ -383,6 +417,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    if (!event.agentId) turnRunning = false;
     if (compacting || event.agentId || event.reason !== 'answer') return next(event);
     compacting = true;
     try {

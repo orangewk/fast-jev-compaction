@@ -9,6 +9,8 @@ import {
   summarize,
   toSessionMessages,
   verdict,
+  bareSlashCommand,
+  busyCommandNotice,
 } from '../hooks/fast-jev.ts';
 import {
   applyDecisions,
@@ -63,7 +65,7 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, floorPercent: 25, minReductionRatio: 0.25, model: 'jev-latest' });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, floorPercent: 25, logDecisions: false, minReductionRatio: 0.25, model: 'jev-latest' });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
     ).toEqual({
@@ -74,6 +76,7 @@ describe('hook config', () => {
       goal: 'g',
       compactAtPercent: 60,
       floorPercent: 25,
+      logDecisions: false,
       minReductionRatio: 0.25,
     });
   });
@@ -298,5 +301,68 @@ describe('hook dispatch guards', () => {
     expect(usage).toHaveBeenCalledTimes(1);
     expect(compact).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('decision log and mid-turn slash commands', () => {
+  type HookHandler = (...args: any[]) => any;
+
+  function handlers(options: Record<string, unknown> = {}) {
+    const registered = new Map<string, HookHandler>();
+    const on = ((name: string, ...args: unknown[]) => {
+      registered.set(name, args.at(-1) as HookHandler);
+    }) as unknown as On;
+    registerHook(on, { apiKey: 'k', preserveRecentMessages: 1, ...options });
+    return registered;
+  }
+
+  it('keeps the per-call decision lines out of the transcript unless asked for', () => {
+    expect(resolveHookConfig({}).logDecisions).toBe(false);
+    expect(resolveHookConfig({ logDecisions: true }).logDecisions).toBe(true);
+  });
+
+  it('recognizes a delivery that is only a slash command', () => {
+    expect(bareSlashCommand('/compact')).toBe('/compact');
+    expect(bareSlashCommand('  /context  ')).toBe('/context');
+    expect(bareSlashCommand('/compact keep the plan')).toBe('/compact');
+    expect(bareSlashCommand('what does /compact do?')).toBeUndefined();
+    expect(bareSlashCommand('/compact\nand then continue')).toBeUndefined();
+    expect(bareSlashCommand('/')).toBeUndefined();
+  });
+
+  it('rewrites a remote slash command that arrives mid-turn, and passes it through when idle', async () => {
+    const hooks = handlers();
+    const receive = hooks.get('session.receive')!;
+    const next = vi.fn(async (event: { text: string }) => ({ text: event.text }));
+    const bridge = { kind: 'bridge' };
+
+    await receive({}, { origin: bridge, text: '/context' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: bridge, text: '/context' });
+
+    await hooks.get('turn.start')!({}, { text: 'go', turnId: 't1' }, async (e: unknown) => e);
+    await receive({}, { origin: bridge, text: '/context' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: bridge, text: busyCommandNotice('/context') });
+
+    await receive({}, { origin: { kind: 'peer' }, text: '/context' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: { kind: 'peer' }, text: '/context' });
+    await receive({}, { origin: bridge, text: 'please /compact later' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: bridge, text: 'please /compact later' });
+
+    const done = vi.fn(async () => ({ text: '' }));
+    await hooks.get('turn.complete')!(
+      { session: { usage: async () => ({ context: { percent: 0 } }), compact: vi.fn() } },
+      { reason: 'answer', agentId: 'sub' },
+      done,
+    );
+    await receive({}, { origin: bridge, text: '/compact' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: bridge, text: busyCommandNotice('/compact') });
+
+    await hooks.get('turn.complete')!(
+      { session: { usage: async () => ({ context: { percent: 0 } }), compact: vi.fn() } },
+      { reason: 'aborted' },
+      done,
+    );
+    await receive({}, { origin: bridge, text: '/compact' }, next);
+    expect(next).toHaveBeenLastCalledWith({ origin: bridge, text: '/compact' });
   });
 });
