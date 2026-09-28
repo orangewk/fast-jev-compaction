@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { On, SessionCompactInput, TurnCompleteInput } from 'claude-code';
 import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  register as registerHook,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -196,5 +198,105 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('hook dispatch guards', () => {
+  type HookHandler = (...args: any[]) => any;
+
+  function handlers() {
+    const registered = new Map<string, HookHandler>();
+    const on = ((name: string, ...args: unknown[]) => {
+      registered.set(name, args.at(-1) as HookHandler);
+    }) as unknown as On;
+    registerHook(on, { apiKey: 'k', preserveRecentMessages: 1 });
+    return registered;
+  }
+
+  it('skips precompute without asking Jev or continuing to core', async () => {
+    const hook = handlers().get('session.compact')!;
+    const fetch = vi.fn();
+    const next = vi.fn();
+    const event = { trigger: 'precompute', messages: transcript() } as SessionCompactInput;
+    const result = await hook({ http: { fetch } }, event, next);
+
+    expect(result).toEqual({ skip: 'fast-jev-compaction: no precompute' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('leaves a fork transcript to core without asking Jev', async () => {
+    const hook = handlers().get('session.compact')!;
+    const fetch = vi.fn();
+    const next = vi.fn(async () => ({ messages: [] }));
+    const event = { trigger: 'manual', agentId: 'fork-1', messages: transcript() } as SessionCompactInput;
+
+    await hook({ http: { fetch } }, event, next);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(event);
+  });
+
+  for (const trigger of ['manual', 'auto'] as const) {
+    it(`still asks Jev for ${trigger} compaction`, async () => {
+      const hook = handlers().get('session.compact')!;
+      const bodies: string[] = [];
+      const event = { trigger, messages: transcript() } as SessionCompactInput;
+      const next = vi.fn(async () => ({ messages: event.messages }));
+      await hook(
+        {
+          http: { fetch: jevFetch(() => 0.1, bodies) },
+          session: { usage: async () => ({ context: { tokens: 0, window: 1_000_000 } }) },
+          ui: { log: vi.fn(), toast: vi.fn() },
+        },
+        event,
+        next,
+      );
+
+      expect(bodies).toHaveLength(1);
+      expect(next).not.toHaveBeenCalled();
+    });
+  }
+
+  it('does not auto-compact subagent or non-answer turns', async () => {
+    const hook = handlers().get('turn.complete')!;
+    const usage = vi.fn(async () => ({ context: { percent: 90 } }));
+    const compact = vi.fn();
+    const next = vi.fn(async () => ({ text: '' }));
+    const engine = { session: { usage, compact } };
+    const events = [
+      { reason: 'answer', agentId: 'agent-1' },
+      { reason: 'aborted' },
+      { reason: 'refusal', refusal: { category: null, explanation: null } },
+      { reason: 'error' },
+    ] as TurnCompleteInput[];
+
+    for (const event of events) await hook(engine, event, next);
+
+    expect(usage).not.toHaveBeenCalled();
+    expect(compact).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(events.length);
+  });
+
+  it('claims the auto-compact guard before awaiting usage', async () => {
+    const hook = handlers().get('turn.complete')!;
+    let releaseUsage!: (usage: { context: { percent: number } }) => void;
+    const pendingUsage = new Promise<{ context: { percent: number } }>((resolve) => {
+      releaseUsage = resolve;
+    });
+    const usage = vi.fn(() => pendingUsage);
+    const compact = vi.fn(async () => undefined);
+    const next = vi.fn(async () => ({ text: '' }));
+    const engine = { session: { usage, compact } };
+    const event = { reason: 'answer' } as TurnCompleteInput;
+
+    const first = hook(engine, event, next);
+    await hook(engine, event, next);
+    releaseUsage({ context: { percent: 90 } });
+    await first;
+
+    expect(usage).toHaveBeenCalledTimes(1);
+    expect(compact).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(2);
   });
 });

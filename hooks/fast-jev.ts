@@ -342,6 +342,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    if (event.agentId) return next(event);
+    if (event.trigger === 'precompute') return { skip: 'fast-jev-compaction: no precompute' };
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
@@ -381,12 +383,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting) return next(event);
+    if (compacting || event.agentId || event.reason !== 'answer') return next(event);
+    compacting = true;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
-      compacting = true;
-      await $.session.compact();
+      if ((context.percent ?? 0) >= configured.compactAtPercent) await $.session.compact();
     } catch (error) {
       $.ui.log(
         `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
