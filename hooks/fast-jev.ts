@@ -211,7 +211,11 @@ export function toSessionMessages(
   }
   return output.map((message) => {
     const own = messages.get(message);
-    if (own) return own;
+    // ponytail: on resume the host merges every transcript line sharing an assistant
+    // message.id, across compact boundaries too, so a kept handle multiplies the
+    // message (galaxias #1306). Rebuilding mints a fresh id; thinking blocks are lost.
+    // Return the handle again once the host stops merging across boundaries.
+    if (own && own.role !== 'assistant') return own;
     const rebuilt: SessionMessage = {
       role: message.role,
       text: message.text,
