@@ -57,6 +57,24 @@
       "title": "Jev model",
       "description": "TypeSafe Jev model name.",
       "default": "jev-latest"
+    },
+    "floorPercent": {
+      "type": "number",
+      "title": "[local] Post-compaction floor percentage",
+      "description": "[local addition, not upstream] Fall back to the built-in summary when the context window is estimated to stay at or above this percentage after compaction. 25 keeps Jev to 1M-window models in practice.",
+      "default": 25
+    },
+    "logDecisions": {
+      "type": "boolean",
+      "title": "[local] Log decisions",
+      "description": "[local addition, not upstream] Write the per-call decisions: lines to the session log. Off by default; the one-line result is always shown.",
+      "default": false
+    },
+    "keepUnscored": {
+      "type": "boolean",
+      "title": "[local] Keep unscored calls",
+      "description": "[local addition, not upstream] Keep every call the fitted state no longer shows structured instead of applying Jev's answer about it.",
+      "default": false
     }
   }
 }
