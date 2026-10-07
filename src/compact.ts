@@ -1,5 +1,12 @@
 import { noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState, isMachineText, isPinned } from './state.js';
+import {
+  collectToolCalls,
+  estimateTokens,
+  fitState,
+  isMachineText,
+  isPinned,
+  sliceSurrogateSafe,
+} from './state.js';
 import type {
   CallAnswer,
   CallDecision,
@@ -144,7 +151,7 @@ async function askBatch(
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
+  const head = headChars > 0 ? `${sliceSurrogateSafe(text, 0, headChars)}\n` : '';
   return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
@@ -186,7 +193,7 @@ export function truncateHostNotices(
     const cut = message.text.length - headChars;
     truncated += 1;
     charsCut += cut;
-    const head = headChars > 0 ? `${message.text.slice(0, headChars)}\n` : '';
+    const head = headChars > 0 ? `${sliceSurrogateSafe(message.text, 0, headChars)}\n` : '';
     return {
       role: message.role,
       text: `${head}${NOTICE_NOTE_START}${cut}${NOTICE_NOTE_END}`,

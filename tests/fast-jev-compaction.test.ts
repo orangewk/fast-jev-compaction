@@ -20,6 +20,7 @@ import {
   truncatedResult,
   sliceSurrogateSafe,
   truncate,
+  truncateHostNotices,
   type HistoryToolCall,
   type JevAsker,
   type JevQuestions,
@@ -737,5 +738,39 @@ describe('surrogate-safe cuts (#128)', () => {
       q: { type: 'noul', instructions: 'x' },
     });
     expect(JSON.parse(paired.body).state).toEqual({ ok: '🔥' });
+  });
+});
+
+describe('surrogate-safe cuts after Jev answers', () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it('truncateHostNotices keeps a surrogate pair whole at the head cut', () => {
+    // '<task-notification>' is 19 chars, so a 20-char head would split the 🔥 at index 19.
+    const notice = `<task-notification>🔥${'x'.repeat(300)}`;
+    const { messages, truncated } = truncateHostNotices(
+      [message('user', 'first'), message('user', notice), message('user', 'latest')],
+      { preserveRecentMessages: 1, truncateHeadChars: 20 },
+    );
+    expect(truncated).toBe(1);
+    expect(messages[1]?.text.startsWith('<task-notification>\n')).toBe(true);
+    expect(lone.test(messages[1]?.text ?? '')).toBe(false);
+  });
+
+  it('a truncated tool result keeps a surrogate pair whole at the head cut', async () => {
+    const big = `${'x'.repeat(39)}🔥${'y'.repeat(400)}`;
+    const messages: Message[] = [
+      message('user', 'read it'),
+      call('e1', 'Read', { file_path: 'a' }, big),
+      result('e1', big),
+      message('assistant', 'done'),
+    ];
+    const out = await compact(
+      messages,
+      fakeJev((name) => (name.startsWith('call_') ? 0.9 : 0.1)),
+      { preserveRecentMessages: 1, truncateHeadChars: 40 },
+    );
+    const cut = out.messages.find((m) => m.toolResults?.[0]?.tool_use_id === 'e1')?.toolResults?.[0]?.text ?? '';
+    expect(cut).not.toBe(big);
+    expect(lone.test(cut)).toBe(false);
   });
 });
