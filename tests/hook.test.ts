@@ -127,6 +127,37 @@ describe('session message mapping', () => {
     expect(out[2]?.toolResults?.[0]).toBe(messages[2]!.toolResults![0]);
   });
 
+  it('rebuilds the calls of one response as one message, and keeps responses a dropped call left adjacent apart', () => {
+    const messages = [
+      message('user', 'Fix it.', { handle: 'h-0' }),
+      message('assistant', 'Looking around.', { handle: 'h-1' }),
+      call('tool-1', 'Read', { file_path: 'a.ts' }, 'a'),
+      result('tool-1', 'a'),
+      message('assistant', 'Two checks at once.', { handle: 'h-4' }),
+      call('tool-2', 'Bash', { command: 'npm test' }, 'ok'),
+      call('tool-3', 'Bash', { command: 'npm run lint' }, 'ok'),
+      result('tool-2', 'ok'),
+      result('tool-3', 'ok'),
+      message('assistant', 'All green.', { handle: 'h-9' }),
+    ];
+    const calls = collectToolCalls(messages, 0);
+    const decisions = calls.map((c) =>
+      decideCall(c, c.tool === 'Read' ? { keepCall: 0.1, keepResult: 0.1 } : { keepCall: 0.9, keepResult: 0.9 }, { keepThreshold: 0.5 }),
+    );
+    const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
+    expect(
+      out.map((m) => [m.role, m.text, m.toolUses.map((t) => t.tool_use_id), (m.toolResults ?? []).map((r) => r.tool_use_id)]),
+    ).toEqual([
+      ['user', 'Fix it.', [], []],
+      ['assistant', 'Looking around.\n[⌫1]', [], []],
+      ['assistant', 'Two checks at once.', ['tool-2', 'tool-3'], []],
+      ['user', '', [], ['tool-2']],
+      ['user', '', [], ['tool-3']],
+      ['assistant', 'All green.', [], []],
+    ]);
+    expect(out[2]?.toolUses[0]).toBe(messages[5]!.toolUses[0]);
+  });
+
   it('keeps short dropped-result messages, handles only on user text', () => {
     const messages = transcript();
     messages[1]!.toolUses[0]!.text = 'y'.repeat(100);

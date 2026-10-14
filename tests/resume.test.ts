@@ -15,6 +15,7 @@ function jevFetch(answer: (name: string) => number) {
 
 const keepAll = () => 0.95;
 const dropRead = (name: string) => (name.endsWith('_t1') ? 0.1 : 0.95);
+const dropBuild = (name: string) => (name.endsWith('_t4') ? 0.1 : 0.95);
 
 function work(host: HostModel): void {
   host.prompt('Fix the failing test.');
@@ -24,6 +25,11 @@ function work(host: HostModel): void {
   host.respond('Running both suites.', [
     { tool: 'Bash', input: { command: 'npm test' }, result: 'FAIL b.test.ts: expected 2 to be 3' },
     { tool: 'Bash', input: { command: 'npm run lint' }, result: 'ok' },
+  ]);
+  host.respond('Building while I look at the test.', [
+    { tool: 'Bash', input: { command: 'npm run build' }, result: 'built' },
+    { tool: 'Grep', input: { pattern: 'expected' }, result: 'b.test.ts:3', streamed: true },
+    { tool: 'Read', input: { file_path: 'b.test.ts' }, result: 'expect(add(1, 1)).toBe(3)', streamed: true },
   ]);
   host.respond('b.test.ts expects 3; fixing it.', [
     { tool: 'Edit', input: { file_path: 'b.test.ts' }, result: 'updated' },
@@ -56,7 +62,11 @@ const prompt = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 for (const dropBeforeLastBoundary of [true, false]) {
   const regime = dropBeforeLastBoundary ? 'from the last boundary on' : 'with the lines before it';
   describe(`resume after compaction, transcript read ${regime}`, () => {
-    for (const [label, answer] of [['keeping every call', keepAll], ['dropping a call', dropRead]] as const) {
+    for (const [label, answer] of [
+      ['keeping every call', keepAll],
+      ['dropping a call', dropRead],
+      ['dropping the slow call of a parallel response', dropBuild],
+    ] as const) {
       it(`reads back every message the compaction kept, ${label}`, async () => {
         const host = new HostModel(dropBeforeLastBoundary);
         work(host);
@@ -64,7 +74,32 @@ for (const dropBeforeLastBoundary of [true, false]) {
         host.prompt('continue');
         expect(view(host.resume())).toEqual(view([...kept, prompt('continue')]));
       });
+
+      it(`answers every kept call in the request, live and on resume, ${label} (upstream #137)`, async () => {
+        const host = new HostModel(dropBeforeLastBoundary);
+        work(host);
+        expect(host.unpaired('live')).toEqual([]);
+        await compact(host, answer);
+        expect(host.unpaired('live')).toEqual([]);
+        host.prompt('continue');
+        expect(host.unpaired('resume')).toEqual([]);
+      });
     }
+
+    it('keeps a parallel response one message with its results right after it', async () => {
+      const host = new HostModel(dropBeforeLastBoundary);
+      work(host);
+      const kept = await compact(host, keepAll);
+      const at = kept.findIndex((message) => message.text === 'Building while I look at the test.');
+      const [build, grep, read] = kept[at]!.toolUses.map((tool) => tool.tool_use_id);
+      expect(kept[at]!.toolUses.map((tool) => tool.tool)).toEqual(['Bash', 'Grep', 'Read']);
+      expect(kept.slice(at + 1, at + 4).map((message) => message.toolResults?.map((result) => result.tool_use_id))).toEqual([
+        [grep],
+        [read],
+        [build],
+      ]);
+      expect(kept[at + 4]?.role).toBe('assistant');
+    });
 
     it('leaves one copy of each kept message after two compactions (galaxias #1306)', async () => {
       const host = new HostModel(dropBeforeLastBoundary);
@@ -88,6 +123,13 @@ describe('host model', () => {
     host.compact(before.map((message) => (message.role === 'assistant' ? { ...message, handle: undefined } : message)));
     host.prompt('continue');
     expect(host.resume().length).toBeLessThan(before.length);
+  });
+
+  it('reproduces the unanswered calls when each kept line is rebuilt alone (911ae3f, upstream #137)', async () => {
+    const host = new HostModel(true);
+    work(host);
+    host.compact(host.messages().map(({ handle: _handle, ...message }) => message));
+    expect(host.unpaired('live')).not.toEqual([]);
   });
 
   it('reproduces the copies when assistants keep their handles too (before 911ae3f)', async () => {

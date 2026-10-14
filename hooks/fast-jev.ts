@@ -192,11 +192,79 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
 }
 
 /**
+ * The API response each input message belongs to, as the index of its first
+ * assistant message; -1 for a user message. The host hands one content block
+ * per message and runs fast tools while the response still streams, so a
+ * response is a run of assistant messages that tool-result messages break
+ * only while one of its calls is still unanswered (a new response cannot
+ * start before every call has its result).
+ */
+function responseStarts(input: readonly Message[]): number[] {
+  let start = -1;
+  let afterResults = false;
+  const unanswered = new Set<string>();
+  return input.map((message, index) => {
+    if (message.role === 'user') {
+      if (!message.toolResults?.length) start = -1;
+      for (const result of message.toolResults ?? []) unanswered.delete(result.tool_use_id);
+      afterResults = true;
+      return -1;
+    }
+    if (start < 0 || (afterResults && unanswered.size === 0)) {
+      start = index;
+      unanswered.clear();
+    }
+    afterResults = false;
+    for (const tool of message.toolUses) unanswered.add(tool.tool_use_id);
+    return start;
+  });
+}
+
+/**
+ * The input index each output message came from, or -1 for one the library
+ * added or a user message it rewrote. The library keeps the order and never
+ * removes an assistant message with text, so a rebuilt message is found by
+ * its first tool use or, with none left, as the next assistant with text.
+ */
+function sourceIndices(input: readonly Message[], output: readonly Message[]): number[] {
+  const at = new Map<Message, number>(input.map((message, index) => [message, index]));
+  const byCall = new Map<string, number>();
+  input.forEach((message, index) => {
+    for (const tool of message.toolUses) byCall.set(`use:${tool.tool_use_id}`, index);
+    for (const result of message.toolResults ?? []) byCall.set(`result:${result.tool_use_id}`, index);
+  });
+  let next = 0;
+  return output.map((message) => {
+    let index = at.get(message);
+    if (index === undefined) {
+      const use = message.toolUses[0];
+      const result = message.toolResults?.[0];
+      if (use) index = byCall.get(`use:${use.tool_use_id}`);
+      else if (result) index = byCall.get(`result:${result.tool_use_id}`);
+      else if (message.role === 'assistant') {
+        index = input.findIndex(
+          (other, i) =>
+            i >= next &&
+            other.role === 'assistant' &&
+            other.text.trim().length > 0 &&
+            message.text.startsWith(other.text),
+        );
+      }
+    }
+    if (index === undefined || index < 0) return -1;
+    next = index + 1;
+    return index;
+  });
+}
+
+/**
  * Maps the library's output back onto session messages. A user message that
  * came back unchanged and carries no tool results is the engine's own object,
  * handle included; every other message is rebuilt without a handle, so the
  * engine builds it from the content (tool uses and tool results inside stay the
- * engine's own objects where unchanged).
+ * engine's own objects where unchanged). The assistant messages kept from one
+ * response are rebuilt as one, at the place of the first, so its calls stay
+ * one message with their results after it.
  */
 export function toSessionMessages(
   input: readonly SessionMessage[],
@@ -210,7 +278,20 @@ export function toSessionMessages(
     for (const tool of message.toolUses) uses.set(tool, tool);
     for (const result of message.toolResults ?? []) results.set(result, result);
   }
-  return output.map((message) => {
+  // ponytail: the host writes a rebuilt message as one line with a fresh message.id,
+  // so the calls of one response rebuilt one by one become separate API messages, and
+  // the host's pairing check replaces the results of all but the last with "missing"
+  // (upstream #137). Rebuilding the response as one message keeps them paired.
+  const starts = responseStarts(input);
+  const response = sourceIndices(input, output).map((index, at) =>
+    output[at]!.role === 'assistant' && index >= 0 ? starts[index]! : -1,
+  );
+  const members = new Map<number, Message[]>();
+  output.forEach((message, at) => {
+    if (response[at]! >= 0) members.set(response[at]!, [...(members.get(response[at]!) ?? []), message]);
+  });
+  const out: SessionMessage[] = [];
+  output.forEach((message, at) => {
     const own = messages.get(message);
     // ponytail: on resume the host merges every transcript line sharing an assistant
     // message.id, across compact boundaries too, so a kept handle multiplies the
@@ -220,19 +301,27 @@ export function toSessionMessages(
     // had before this compaction, and the host writes that as its parentUuid; a resume
     // reads from the boundary on and loses everything before the result. Rebuilt, it
     // chains to the message before it; its attachments and non-text blocks are lost.
-    if (own && own.role === 'user' && !own.toolResults?.length) return own;
+    if (own && own.role === 'user' && !own.toolResults?.length) {
+      out.push(own);
+      return;
+    }
+    const group = members.get(response[at]!) ?? [message];
+    if (group[0] !== message) return;
     const rebuilt: SessionMessage = {
       role: message.role,
-      text: message.text,
-      toolUses: message.toolUses.map((tool) => uses.get(tool) ?? toolUseSummary(tool)),
+      text: group.map((member) => member.text).filter((text) => text.length > 0).join('\n\n'),
+      toolUses: group.flatMap((member) =>
+        member.toolUses.map((tool) => uses.get(tool) ?? toolUseSummary(tool)),
+      ),
     };
     if (message.toolResults && message.toolResults.length > 0) {
       rebuilt.toolResults = message.toolResults.map(
         (result) => results.get(result) ?? toolResultSummary(result),
       );
     }
-    return rebuilt;
+    out.push(rebuilt);
   });
+  return out;
 }
 
 export type SessionCompaction = {

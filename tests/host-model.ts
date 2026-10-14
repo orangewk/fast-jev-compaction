@@ -19,6 +19,10 @@ import type { Message, ToolResult, ToolUse } from '../src/index.js';
  *   parentUuid back from the last line, `A1r` stands in for a missing parent
  *   with the closest line at most 5 s older, and `P1r` adds every loaded
  *   assistant line sharing a message.id with one on the walk.
+ * - A request merges the assistant lines sharing a message.id, past the
+ *   tool-result lines between them, and joins consecutive user lines; then
+ *   `ensureToolResultPairing` replaces each call the next user message does
+ *   not answer with a "missing" result and strips the orphaned real one.
  */
 type Line = {
   uuid: string;
@@ -71,11 +75,23 @@ export class HostModel {
     this.append({ kind: 'user', text, toolUses: [] });
   }
 
-  /** One API response, written one content block per line as the host does. */
-  respond(text: string, calls: { tool: string; input: Record<string, unknown>; result: string }[] = []): void {
+  /**
+   * One API response, written one content block per line as the host does. A
+   * `streamed` call is one the host ran while the response still streamed: its
+   * result line comes right after its call, before the next call's line.
+   */
+  respond(
+    text: string,
+    calls: { tool: string; input: Record<string, unknown>; result: string; streamed?: boolean }[] = [],
+  ): void {
     const messageId = this.id('msg');
     if (text) this.append({ kind: 'assistant', messageId, text, toolUses: [] });
-    const rows = calls.map((call) => {
+    const answer = ({ row, tool_use_id, result }: { row: Line; tool_use_id: string; result: string }) =>
+      this.append(
+        { kind: 'user', sourceToolAssistantUUID: row.uuid, text: '', toolUses: [], toolResults: [{ tool_use_id, text: result, isError: false }] },
+        row.uuid,
+      );
+    const later = calls.flatMap((call) => {
       const tool_use_id = this.id('toolu');
       const row = this.append({
         kind: 'assistant',
@@ -83,14 +99,12 @@ export class HostModel {
         text: '',
         toolUses: [{ tool_use_id, tool: call.tool, input: call.input, text: call.result }],
       });
-      return { row, tool_use_id, result: call.result };
+      const pending = { row, tool_use_id, result: call.result };
+      if (!call.streamed) return [pending];
+      answer(pending);
+      return [];
     });
-    for (const { row, tool_use_id, result } of rows) {
-      this.append(
-        { kind: 'user', sourceToolAssistantUUID: row.uuid, text: '', toolUses: [], toolResults: [{ tool_use_id, text: result, isError: false }] },
-        row.uuid,
-      );
-    }
+    for (const pending of later) answer(pending);
   }
 
   messages(): HookMessage[] {
@@ -132,6 +146,49 @@ export class HostModel {
 
   /** The conversation a resume of the transcript reads. */
   resume(): Message[] {
+    return this.resumed().map((step) => this.toMessage(step));
+  }
+
+  /**
+   * The calls the pairing check finds unanswered in a request built from the
+   * running session (`live`) or from a resume of the transcript.
+   */
+  unpaired(from: 'live' | 'resume'): string[] {
+    type Turn = { role: 'user' | 'assistant'; messageId?: string; uses: string[]; results: string[]; text: string };
+    const turns: Turn[] = [];
+    for (const line of from === 'live' ? this.live : this.resumed()) {
+      if (line.kind === 'user') {
+        const last = turns.at(-1);
+        const results = (line.toolResults ?? []).map((result) => result.tool_use_id);
+        if (last?.role === 'user') {
+          last.results.push(...results);
+          last.text += line.text;
+        } else turns.push({ role: 'user', uses: [], results, text: line.text });
+        continue;
+      }
+      if (line.kind !== 'assistant') continue;
+      const uses = line.toolUses.map((tool) => tool.tool_use_id);
+      let same: Turn | undefined;
+      for (let i = turns.length - 1; i >= 0; i -= 1) {
+        const turn = turns[i]!;
+        if (turn.role === 'user' && (turn.text !== '' || turn.results.length === 0)) break;
+        if (turn.role === 'assistant' && turn.messageId === line.messageId) {
+          same = turn;
+          break;
+        }
+      }
+      if (same) same.uses.push(...uses);
+      else turns.push({ role: 'assistant', messageId: line.messageId, uses, results: [], text: line.text });
+    }
+    return turns.flatMap((turn, i) => {
+      const next = turns[i + 1];
+      return turn.role === 'assistant'
+        ? turn.uses.filter((id) => next?.role !== 'user' || !next.results.includes(id))
+        : [];
+    });
+  }
+
+  private resumed(): Line[] {
     const last = this.lines.findLastIndex((line) => line.kind === 'boundary');
     const loaded = this.dropBeforeLastBoundary && last >= 0 ? this.lines.slice(last) : [...this.lines];
     const byUuid = new Map(loaded.map((line) => [line.uuid, line]));
@@ -166,6 +223,6 @@ export class HostModel {
         }
       }
     }
-    return conversation.filter((step) => step.kind !== 'boundary').map((step) => this.toMessage(step));
+    return conversation.filter((step) => step.kind !== 'boundary');
   }
 }
