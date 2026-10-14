@@ -192,10 +192,11 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
 }
 
 /**
- * Maps the library's output back onto session messages. Whatever came back
- * unchanged (a message, a tool use, a tool result) is the engine's own object,
- * handle included; anything rebuilt is a fresh message without a handle, so the
- * engine takes the edited content instead of its original.
+ * Maps the library's output back onto session messages. A user message that
+ * came back unchanged and carries no tool results is the engine's own object,
+ * handle included; every other message is rebuilt without a handle, so the
+ * engine builds it from the content (tool uses and tool results inside stay the
+ * engine's own objects where unchanged).
  */
 export function toSessionMessages(
   input: readonly SessionMessage[],
@@ -215,7 +216,11 @@ export function toSessionMessages(
     // message.id, across compact boundaries too, so a kept handle multiplies the
     // message (galaxias #1306). Rebuilding mints a fresh id; thinking blocks are lost.
     // Return the handle again once the host stops merging across boundaries.
-    if (own && own.role !== 'assistant') return own;
+    // A kept tool-result message keeps its sourceToolAssistantUUID, the uuid its call
+    // had before this compaction, and the host writes that as its parentUuid; a resume
+    // reads from the boundary on and loses everything before the result. Rebuilt, it
+    // chains to the message before it; its attachments and non-text blocks are lost.
+    if (own && own.role === 'user' && !own.toolResults?.length) return own;
     const rebuilt: SessionMessage = {
       role: message.role,
       text: message.text,

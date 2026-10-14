@@ -106,7 +106,8 @@ describe('session message mapping', () => {
     expect(out[2]?.toolResults?.[0]).toMatchObject({ tool_use_id: 'tool-1', isError: false });
     expect(out[3]?.handle).toBeUndefined();
     expect(out[3]?.toolUses).toEqual(messages[3]!.toolUses);
-    expect(out[4]).toBe(messages[4]);
+    expect(out[4]?.handle).toBeUndefined();
+    expect(out[4]?.toolResults?.[0]).toBe(messages[4]!.toolResults![0]);
   });
 
   it('rebuilds kept assistant messages without their handle so the host mints a fresh id', () => {
@@ -118,7 +119,15 @@ describe('session message mapping', () => {
     expect(out[6]).toBe(messages[6]);
   });
 
-  it('keeps short dropped-result messages, handles only on non-assistant ones', () => {
+  it('rebuilds kept tool-result messages so the host does not parent them on the pre-compaction call', () => {
+    const messages = transcript();
+    const out = toSessionMessages(messages, messages);
+    expect(out[2]).not.toBe(messages[2]);
+    expect(out[2]?.handle).toBeUndefined();
+    expect(out[2]?.toolResults?.[0]).toBe(messages[2]!.toolResults![0]);
+  });
+
+  it('keeps short dropped-result messages, handles only on user text', () => {
     const messages = transcript();
     messages[1]!.toolUses[0]!.text = 'y'.repeat(100);
     messages[2]!.toolResults![0]!.text = 'y'.repeat(100);
@@ -129,7 +138,8 @@ describe('session message mapping', () => {
     ];
     const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
     expect(out[1]?.handle).toBeUndefined();
-    expect(out[2]).toBe(messages[2]);
+    expect(out[2]?.handle).toBeUndefined();
+    expect(out[2]?.toolResults?.[0]).toBe(messages[2]!.toolResults![0]);
   });
 });
 
@@ -145,7 +155,7 @@ describe('compactSession', () => {
     expect(bodies).toHaveLength(1);
     expect(JSON.parse(bodies[0]!).model).toBe('jev-x');
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_call', 'keep']);
-    expect(messages.map((m) => m.handle)).toEqual(['h-0', undefined, undefined, 'r-tool-2', undefined, 'h-6']);
+    expect(messages.map((m) => m.handle)).toEqual(['h-0', undefined, undefined, undefined, undefined, 'h-6']);
     expect(messages[1]?.text).toMatch(/^\[fast-jev-compaction boundary: this round removed 1 tool call \(Read 1\); earlier rounds removed 0 tool calls\./);
     expect(summarize(output)).toMatch(/^\d+% reduction; 1 kept, 1 call_dropped; state ~\d+ tokens \(full\) in 1 request\(s\)$/);
     expect(decisionLog(output)).toBe('t1:Read:drop_call/call=0.10/result=0.10 t2:Bash:keep/call=0.90/result=0.90');
