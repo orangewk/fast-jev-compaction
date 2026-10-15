@@ -1,5 +1,29 @@
 # fast-jev-compaction
 
+> **This is a maintained fork of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction),
+> which has had no commits since 2026-09-18.** It fixes bugs that make a compacted Claude Code session
+> lose kept messages or tool results when the session is resumed:
+>
+> - Kept tool-result rows are rebuilt without their `handle`, so resume no longer stops at a
+>   `parentUuid` behind the compact boundary and drops everything before it
+>   ([5dad087](https://github.com/orangewk/fast-jev-compaction/commit/5dad087),
+>   anthropics/claude-code#95328).
+> - Kept assistant rows are rebuilt without their `handle`, so resume no longer merges the old and
+>   new copies of one message ([911ae3f](https://github.com/orangewk/fast-jev-compaction/commit/911ae3f),
+>   anthropics/claude-code#99727).
+> - The kept calls of one response are rebuilt as one message, so parallel tool results are not
+>   replaced with "Tool result missing" ([ad91a16](https://github.com/orangewk/fast-jev-compaction/commit/ad91a16),
+>   [e1a77b5](https://github.com/orangewk/fast-jev-compaction/commit/e1a77b5), upstream #137).
+> - Text cuts keep surrogate pairs whole, and subagent compactions are left to the built-in summary.
+>
+> Install from this fork:
+>
+>     claude plugin marketplace add orangewk/fast-jev-compaction
+>     claude plugin install fast-jev-compaction@fast-jev-compaction
+>
+> No support is promised. Some of these fixes become unnecessary once anthropics/claude-code#95328
+> is fixed in Claude Code.
+
 Claude Code plugin that replaces the compaction summary with Jev decisions:
 every tool call and result is scored in one fast request, stale ones are
 dropped or truncated, everything kept stays verbatim. Also usable as an npm
