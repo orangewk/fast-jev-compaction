@@ -3,7 +3,9 @@
 Claude Code plugin that replaces the compaction summary with Jev decisions:
 every tool call and result is scored in one fast request, stale ones are
 dropped or truncated, everything kept stays verbatim. Also usable as an npm
-library.
+library. In Claude Code, kept messages are rebuilt from their text, tool calls
+and tool results, so their thinking blocks, images and attached rows are lost;
+see [hooks/README.md](hooks/README.md#scope-and-caveat).
 
 ## What and why
 

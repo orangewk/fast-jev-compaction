@@ -86,6 +86,21 @@ for (const dropBeforeLastBoundary of [true, false]) {
       });
     }
 
+    it('answers every call of a response split where a streamed call was answered before the next', async () => {
+      const host = new HostModel(dropBeforeLastBoundary);
+      host.prompt('Check both.');
+      host.respond('Two checks.', [
+        { tool: 'Grep', input: { pattern: 'a' }, result: 'a', streamed: true },
+        { tool: 'Read', input: { file_path: 'b.ts' }, result: 'b' },
+      ]);
+      host.respond('Done.');
+      const kept = await compact(host, keepAll);
+      expect(host.unpaired('live')).toEqual([]);
+      host.prompt('continue');
+      expect(host.unpaired('resume')).toEqual([]);
+      expect(view(host.resume())).toEqual(view([...kept, prompt('continue')]));
+    });
+
     it('keeps a parallel response one message with its results right after it', async () => {
       const host = new HostModel(dropBeforeLastBoundary);
       work(host);

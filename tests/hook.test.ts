@@ -158,6 +158,49 @@ describe('session message mapping', () => {
     expect(out[2]?.toolUses[0]).toBe(messages[5]!.toolUses[0]);
   });
 
+  it('splits a response whose streamed call was answered before its next call, each part followed by its result', () => {
+    const messages = [
+      message('user', 'Fix it.', { handle: 'h-0' }),
+      message('assistant', 'Two checks.', { handle: 'h-1' }),
+      call('tool-1', 'Grep', { pattern: 'a' }, 'a'),
+      result('tool-1', 'a'),
+      call('tool-2', 'Read', { file_path: 'b.ts' }, 'b'),
+      result('tool-2', 'b'),
+      message('assistant', 'Done.', { handle: 'h-6' }),
+    ];
+    const out = toSessionMessages(messages, messages);
+    expect(
+      out.map((m) => [m.role, m.text, m.toolUses.map((t) => t.tool_use_id), (m.toolResults ?? []).map((r) => r.tool_use_id)]),
+    ).toEqual([
+      ['user', 'Fix it.', [], []],
+      ['assistant', 'Two checks.', ['tool-1'], []],
+      ['user', '', [], ['tool-1']],
+      ['assistant', '', ['tool-2'], []],
+      ['user', '', [], ['tool-2']],
+      ['assistant', 'Done.', [], []],
+    ]);
+  });
+
+  it('does not wait for a call whose result is missing, so the next response stays apart', () => {
+    const messages = [
+      message('user', 'Fix it.', { handle: 'h-0' }),
+      message('assistant', 'Two checks.', { handle: 'h-1' }),
+      call('tool-1', 'Bash', { command: 'npm test' }, 'interrupted'),
+      call('tool-2', 'Read', { file_path: 'b.ts' }, 'b'),
+      result('tool-2', 'b'),
+      message('assistant', 'Done.', { handle: 'h-5' }),
+    ];
+    const out = toSessionMessages(messages, messages);
+    expect(
+      out.map((m) => [m.role, m.text, m.toolUses.map((t) => t.tool_use_id), (m.toolResults ?? []).map((r) => r.tool_use_id)]),
+    ).toEqual([
+      ['user', 'Fix it.', [], []],
+      ['assistant', 'Two checks.', ['tool-1', 'tool-2'], []],
+      ['user', '', [], ['tool-2']],
+      ['assistant', 'Done.', [], []],
+    ]);
+  });
+
   it('keeps short dropped-result messages, handles only on user text', () => {
     const messages = transcript();
     messages[1]!.toolUses[0]!.text = 'y'.repeat(100);

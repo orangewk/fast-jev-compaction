@@ -197,9 +197,15 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
  * per message and runs fast tools while the response still streams, so a
  * response is a run of assistant messages that tool-result messages break
  * only while one of its calls is still unanswered (a new response cannot
- * start before every call has its result).
+ * start before every call has its result). A call whose result is nowhere in
+ * the input is not waited for. A response whose calls were all answered
+ * before its next call is split there; each part keeps its results right
+ * after it, so the host still pairs every call.
  */
 function responseStarts(input: readonly Message[]): number[] {
+  const answered = new Set(
+    input.flatMap((message) => (message.toolResults ?? []).map((result) => result.tool_use_id)),
+  );
   let start = -1;
   let afterResults = false;
   const unanswered = new Set<string>();
@@ -215,7 +221,9 @@ function responseStarts(input: readonly Message[]): number[] {
       unanswered.clear();
     }
     afterResults = false;
-    for (const tool of message.toolUses) unanswered.add(tool.tool_use_id);
+    for (const tool of message.toolUses) {
+      if (answered.has(tool.tool_use_id)) unanswered.add(tool.tool_use_id);
+    }
     return start;
   });
 }
@@ -293,10 +301,6 @@ export function toSessionMessages(
   const out: SessionMessage[] = [];
   output.forEach((message, at) => {
     const own = messages.get(message);
-    // ponytail: on resume the host merges every transcript line sharing an assistant
-    // message.id, across compact boundaries too, so a kept handle multiplies the
-    // message (galaxias #1306). Rebuilding mints a fresh id; thinking blocks are lost.
-    // Return the handle again once the host stops merging across boundaries.
     // A kept tool-result message keeps its sourceToolAssistantUUID, the uuid its call
     // had before this compaction, and the host writes that as its parentUuid; a resume
     // reads from the boundary on and loses everything before the result. Rebuilt, it
@@ -305,6 +309,10 @@ export function toSessionMessages(
       out.push(own);
       return;
     }
+    // ponytail: on resume the host merges every transcript line sharing an assistant
+    // message.id, across compact boundaries too, so a kept handle multiplies the
+    // message (galaxias #1306). Rebuilding mints a fresh id; thinking blocks are lost.
+    // Return the handle again once the host stops merging across boundaries.
     const group = members.get(response[at]!) ?? [message];
     if (group[0] !== message) return;
     const rebuilt: SessionMessage = {

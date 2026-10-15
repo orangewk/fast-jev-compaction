@@ -81,6 +81,16 @@ This mod uses the generated declarations from 2.1.274 in
 `types/claude-code.d.ts`; regenerate and review that file after a
 Claude Code upgrade.
 
+Every kept message except a plain user prompt is returned without its
+`handle`, so Claude Code rebuilds it from its text, tool calls and tool
+results. Returned with the handle, a resume of Claude Code 2.1.293 reads kept
+assistant messages more than once (they share a `message.id` with the lines
+before the compaction) and loses everything before a kept tool result (its
+parent is the pre-compaction call). The kept assistant messages of one
+response are rebuilt as one message so its calls stay paired. A rebuilt
+message loses its thinking blocks, images and the rows attached to it, among
+them prompts the user typed while a tool ran.
+
 References:
 
 - [Claude Code plugins](https://code.claude.com/docs/en/plugins)
